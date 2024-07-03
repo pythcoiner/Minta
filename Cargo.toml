@@ -1,0 +1,22 @@
+[package]
+name = "regtest_gui"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+iced = "0.12.1"
+iced_runtime = "0.12.1"
+
+log = "0.4.20"
+futures = "0.3.30"
+iced_futures = "0.7.0"
+tokio = { version = "1.0.0", features = ["rt", "rt-multi-thread", "macros", "time"] }
+fern = "0.6.2"
+chrono = "0.4.33"
+colored = "2.1.0"
+hex = "0.4.3"
+async-channel = "2.2.0"
+bitcoincore-rpc = {git = "https://github.com/pythcoiner/rust-bitcoincore-rpc.git", branch = "master"}
+miniscript = "12.0.0"
+
