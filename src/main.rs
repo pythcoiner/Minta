@@ -71,7 +71,7 @@ async fn main() {
     settings.window.resizable = false;
 
     tokio::spawn(async move {
-        bitcoind.start();
+        bitcoind.start().await;
     });
 
     // Run the GUI

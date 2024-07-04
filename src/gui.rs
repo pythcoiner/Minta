@@ -4,13 +4,18 @@ use iced::widget::{
     Rule, Space, Text, TextEditor, TextInput,
 };
 use iced::{executor, Application, Command, Element, Length, Subscription, Theme};
-use miniscript::bitcoin::Amount;
+use miniscript::bitcoin::{Address, Amount, Denomination};
 use std::fmt::Formatter;
 use std::fmt::{self, Display};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::bitcoind::{self, BitcoinMessage, BitcoindListener};
+use crate::bitcoind::{
+    self, BitcoinMessage, BitcoindListener, GenerateToAddress, GenerateToDescriptor, SendToAddress,
+    SendToDescriptor,
+};
+
+const MAX_DERIV: u32 = 2u32.pow(31) - 1;
 
 #[derive(Debug, Clone)]
 #[allow(unused)]
@@ -61,6 +66,7 @@ pub enum Message {
     BlockSend(String),
     AutoblockBlocks(String),
     AutoblockTimeframe(TimeFrame),
+    ConsoleEdit(Action),
 
     // buttons
     SelectRpcAuth(bool),
@@ -225,14 +231,14 @@ impl Gui {
         todo!()
     }
 
-    pub fn send_to_bitcoind(&self, msg: BitcoinMessage) {
+    pub fn send_to_bitcoind(&mut self, msg: BitcoinMessage) {
         if let Err(e) = self.sender.send(msg) {
-            // TODO: Log
+            self.print(&format!("Fail to send message to bitcoind: {}", e))
         }
     }
 
-    pub fn disconnect(&self) {
-        // TODO:
+    pub fn disconnect(&mut self) {
+        self.send_to_bitcoind(BitcoinMessage::Disconnect)
     }
 
     pub fn ping_rpc_auth(&self) {
@@ -243,7 +249,7 @@ impl Gui {
         // TODO:
     }
 
-    pub fn connect_rpc_auth(&self) {
+    pub fn connect_rpc_auth(&mut self) {
         let msg = BitcoinMessage::SetCredentials {
             address: self.bitcoind_address.clone(),
             auth: bitcoind::AuthMethod::RpcAuth {
@@ -253,9 +259,10 @@ impl Gui {
         };
 
         self.send_to_bitcoind(msg);
+        self.send_to_bitcoind(BitcoinMessage::Connect);
     }
 
-    pub fn connect_cookie(&self) {
+    pub fn connect_cookie(&mut self) {
         let msg = BitcoinMessage::SetCredentials {
             address: self.bitcoind_address.clone(),
             auth: bitcoind::AuthMethod::Cookie {
@@ -264,6 +271,7 @@ impl Gui {
         };
 
         self.send_to_bitcoind(msg);
+        self.send_to_bitcoind(BitcoinMessage::Connect);
     }
 
     pub fn credentials_valid(&self) -> bool {
@@ -277,31 +285,86 @@ impl Gui {
         }
     }
 
-    pub fn generate_to_self(&self) {
-        // TODO:
+    pub fn generate_to_self(&mut self) {
+        if let Ok(blocks) = u32::from_str(&self.generate_blocks) {
+            self.send_to_bitcoind(BitcoinMessage::GenerateToSelf(blocks));
+        }
     }
 
-    pub fn generate_to_random(&self) {
-        // TODO:
+    pub fn generate_to_random(&mut self) {
+        if let Ok(blocks) = u32::from_str(&self.generate_blocks) {
+            self.send_to_bitcoind(BitcoinMessage::Generate(blocks));
+        }
     }
 
-    pub fn generate_to_address(&self) {
-        // TODO:
+    pub fn generate_to_address(&mut self) {
+        if let (Ok(blocks), Ok(addr)) = (
+            u32::from_str(&self.generate_blocks),
+            Address::from_str(&self.generate_address),
+        ) {
+            if addr.is_valid_for_network(miniscript::bitcoin::Network::Regtest) {
+                let address = addr.assume_checked();
+                self.send_to_bitcoind(BitcoinMessage::GenerateToAddress(GenerateToAddress {
+                    blocks,
+                    address,
+                }))
+            } else {
+                self.print("Invalid address network!")
+            }
+        }
     }
 
-    pub fn generate_to_descriptor(&self) {
-        // TODO:
+    pub fn generate_to_descriptor(&mut self) {
+        if let (Ok(blocks), true, Ok(start_index)) = (
+            u32::from_str(&self.generate_blocks),
+            !self.generate_descriptor.is_empty(),
+            u32::from_str(&self.generate_descriptor_index),
+        ) {
+            self.send_to_bitcoind(BitcoinMessage::GenerateToDescriptor(GenerateToDescriptor {
+                blocks,
+                descriptor: self.generate_descriptor.clone(),
+                start_index,
+            }));
+        }
     }
 
-    pub fn send_to_address(&self) {
-        // TODO:
+    pub fn send_to_address(&mut self) {
+        if let (Ok(amount), Ok(addr)) = (
+            Amount::from_str_in(&self.send_amount, Denomination::Bitcoin),
+            Address::from_str(&self.send_address),
+        ) {
+            if addr.is_valid_for_network(miniscript::bitcoin::Network::Regtest) {
+                let address = addr.assume_checked();
+                self.send_to_bitcoind(BitcoinMessage::SendToAddress(SendToAddress {
+                    amount,
+                    address,
+                }))
+            } else {
+                self.print("Invalid address network!")
+            }
+        }
     }
 
-    pub fn send_to_descriptor(&self) {
-        // TODO:
+    pub fn send_to_descriptor(&mut self) {
+        if let (Ok(count), true, Ok(amount_min), Ok(amount_max), Ok(start_index)) = (
+            u32::from_str(&self.send_count),
+            !self.send_descriptor.is_empty(),
+            Amount::from_str_in(&self.send_min, Denomination::Bitcoin),
+            Amount::from_str_in(&self.send_max, Denomination::Bitcoin),
+            u32::from_str(&self.send_descriptor_index),
+        ) {
+            self.send_to_bitcoind(BitcoinMessage::SendToDescriptor(SendToDescriptor {
+                count,
+                amount_min,
+                amount_max,
+                descriptor: self.send_descriptor.clone(),
+                start_index,
+            }))
+        }
     }
 
-    pub fn print(&mut self, mut msg: String) {
+    pub fn print(&mut self, mut msg: &str) {
+        let mut msg = msg.to_string();
         if !msg.ends_with('\n') {
             msg.push('\n');
         }
@@ -328,10 +391,14 @@ impl Gui {
         let ping = if !self.connected {
             Some(Self::button(
                 "Test Connection",
-                Some(match self.auth_type {
-                    AuthMethod::RpcAuth => Message::PingRpcAuth,
-                    AuthMethod::Cookie => Message::PingCookie,
-                }),
+                if self.credentials_valid() {
+                    Some(match self.auth_type {
+                        AuthMethod::RpcAuth => Message::PingRpcAuth,
+                        AuthMethod::Cookie => Message::PingCookie,
+                    })
+                } else {
+                    None
+                },
             ))
         } else {
             None
@@ -438,13 +505,13 @@ impl Gui {
     }
 
     pub fn auto_block_panel(&self) -> Container<Message> {
-        let autoblock_btn = match (self.generate_wip, self.autoblock_wip) {
-            (true, _) => Self::button("Generate", None),
-            (false, false) => Self::button("Generate", Some(Message::StartAutoblock)),
-            (false, true) => Self::button("Stop", Some(Message::StopAutoblock)),
+        let autoblock_btn = match (self.generate_wip, self.autoblock_wip, self.connected) {
+            (false, false, true) => Self::button("Generate", Some(Message::StartAutoblock)),
+            (false, true, true) => Self::button("Stop", Some(Message::StopAutoblock)),
+            _ => Self::button("Generate", None),
         };
 
-        let wip = self.generate_wip || self.autoblock_wip;
+        let wip = self.generate_wip || self.autoblock_wip || !self.connected;
 
         let blocks_input = {
             let mut input = TextInput::new("blocks", &self.autoblock_blocks).width(100);
@@ -474,7 +541,7 @@ impl Gui {
     }
 
     pub fn generate_panel(&self) -> Container<Message> {
-        let generate_signal = match (&self.generate_target, self.generate_wip) {
+        let generate_signal = match (&self.generate_target, self.generate_wip || !self.connected) {
             (GenerateTarget::Address, false) => Some(Message::GenerateToAddress),
             (GenerateTarget::ToSelf, false) => Some(Message::GenerateToSelf),
             (GenerateTarget::Random, false) => Some(Message::GenerateToRandom),
@@ -484,7 +551,7 @@ impl Gui {
 
         let generate_button = Self::button("Generate", generate_signal);
 
-        let blocks_signal = if !self.generate_wip {
+        let blocks_signal = if !self.generate_wip && self.connected {
             Some(Message::BlocksGenerate)
         } else {
             None
@@ -501,7 +568,7 @@ impl Gui {
         let index_input = if let GenerateTarget::Descriptor = self.generate_target {
             let mut input =
                 TextInput::new("start index", &self.generate_descriptor_index).width(100);
-            if !self.generate_wip {
+            if !self.generate_wip && self.connected {
                 input = input.on_input(Message::DescriptorIndexGenerate);
             }
             Some(input)
@@ -509,13 +576,13 @@ impl Gui {
             None
         };
 
-        let address_signal = if !self.generate_wip {
+        let address_signal = if !self.generate_wip && self.connected {
             Some(Message::AddressGenerate)
         } else {
             None
         };
 
-        let descriptor_signal = if !self.generate_wip {
+        let descriptor_signal = if !self.generate_wip && self.connected {
             Some(Message::DescriptorGenerate)
         } else {
             None
@@ -592,7 +659,7 @@ impl Gui {
 
         let send_address_btn = Self::button(
             "Send",
-            if !self.send_wip {
+            if !self.send_wip && self.connected {
                 Some(Message::SendToAddress)
             } else {
                 None
@@ -602,7 +669,7 @@ impl Gui {
 
         let amount_input = {
             let mut input = TextInput::new("amount", &self.send_amount).width(100);
-            if !self.send_wip {
+            if !self.send_wip && self.connected {
                 input = input.on_input(Message::AmountSend);
             }
             input
@@ -610,7 +677,7 @@ impl Gui {
 
         let address_input = {
             let mut input = TextInput::new("address", &self.send_address).width(Length::Fill);
-            if !self.send_wip {
+            if !self.send_wip && self.connected {
                 input = input.on_input(Message::AddressSend);
             }
             input
@@ -618,7 +685,7 @@ impl Gui {
 
         let send_descriptor_btn = Self::button(
             "Send",
-            if !self.send_wip {
+            if !self.send_wip && self.connected {
                 Some(Message::SendToDescriptor)
             } else {
                 None
@@ -628,7 +695,7 @@ impl Gui {
 
         let count_input = {
             let mut input = TextInput::new("count", &self.send_count);
-            if !self.send_wip {
+            if !self.send_wip && self.connected {
                 input = input.on_input(Message::CountSend);
             }
             input
@@ -636,7 +703,7 @@ impl Gui {
 
         let min_input = {
             let mut input = TextInput::new("min", &self.send_min);
-            if !self.send_wip {
+            if !self.send_wip && self.connected {
                 input = input.on_input(Message::MinSend);
             }
             input
@@ -644,15 +711,15 @@ impl Gui {
 
         let max_input = {
             let mut input = TextInput::new("max", &self.send_max);
-            if !self.send_wip {
+            if !self.send_wip && self.connected {
                 input = input.on_input(Message::MaxSend);
             }
             input
         };
 
         let descriptor_input = {
-            let mut input = TextInput::new("descriptor", &self.send_max);
-            if !self.send_wip {
+            let mut input = TextInput::new("descriptor", &self.send_descriptor);
+            if !self.send_wip && self.connected {
                 input = input.on_input(Message::DescriptorSend);
             }
             input
@@ -660,14 +727,14 @@ impl Gui {
 
         let descriptor_index_input = {
             let mut input = TextInput::new("start index", &self.send_descriptor_index).width(100);
-            if !self.send_wip {
+            if !self.send_wip && self.connected {
                 input = input.on_input(Message::DescriptorIndexSend);
             }
             input
         };
 
         let every_block_checkbox = Checkbox::new("", self.send_every_blocks_enabled)
-            .on_toggle_maybe(if !self.send_wip {
+            .on_toggle_maybe(if !self.send_wip && self.connected {
                 Some(Message::ToggleEveryBlock)
             } else {
                 None
@@ -675,7 +742,7 @@ impl Gui {
 
         let every_block_input = {
             let mut input = TextInput::new("blocks", &self.send_every_blocks).width(120);
-            if !self.send_wip && self.send_every_blocks_enabled {
+            if !self.send_wip && self.send_every_blocks_enabled && self.connected {
                 input = input.on_input(Message::BlockSend);
             }
             input
@@ -735,9 +802,26 @@ impl Gui {
     }
 
     pub fn console_panel(&self) -> Container<Message> {
-        let console = TextEditor::new(&self.console);
+        let console = TextEditor::new(&self.console).on_action(Message::ConsoleEdit);
 
         Container::new(scrollable(console).height(300))
+    }
+
+    pub fn u32_checked(mut input: String, output: &mut String, max: u32) {
+        if let Ok(blocks) = u32::from_str(&input) {
+            if blocks <= max {
+                *output = input;
+            }
+        } else if input.is_empty() {
+            *output = input;
+        }
+    }
+    pub fn amount_checked(mut input: String, output: &mut String) {
+        if Amount::from_str_in(&input, miniscript::bitcoin::Denomination::Bitcoin).is_ok()
+            || input.is_empty()
+        {
+            *output = input;
+        }
     }
 }
 
@@ -754,7 +838,7 @@ impl Application for Gui {
             auth_type: AuthMethod::Cookie,
             user: "".to_string(),
             password: "".to_string(),
-            cookie_path: "".to_string(),
+            cookie_path: "/home/pyth/.bitcoin/regtest/.cookie".to_string(),
             block_height: Some(0),
             balance: Some(Amount::ZERO),
             generate_blocks: "".to_string(),
@@ -806,18 +890,19 @@ impl Application for Gui {
                 BitcoinMessage::GenerateResponse(success) => {
                     self.generate_wip = false;
                     if !success {
-                        // TODO: log fail
+                        self.print("Fail to generate!")
                     }
                 }
                 BitcoinMessage::SendResponse(success) => {
                     self.send_wip = false;
                     if !success {
-                        // TODO: log fail
+                        self.print("Fail to send!")
                     }
                 }
-                BitcoinMessage::SendMessage(_) => {
-                    // TODO: display a log message
+                BitcoinMessage::SendMessage(msg) => {
+                    self.print(&msg);
                 }
+                BitcoinMessage::Connected(connected) => self.connected = connected,
                 _ => {}
             },
 
@@ -826,19 +911,29 @@ impl Application for Gui {
             Message::User(user) => self.user = user,
             Message::Password(pass) => self.password = pass,
             Message::CookiePath(path) => self.cookie_path = path,
-            Message::BlocksGenerate(blocks) => self.generate_blocks = blocks,
+            Message::BlocksGenerate(blocks) => {
+                Self::u32_checked(blocks, &mut self.generate_blocks, 10_000)
+            }
             Message::AddressGenerate(address) => self.generate_address = address,
             Message::DescriptorGenerate(descriptor) => self.generate_descriptor = descriptor,
-            Message::DescriptorIndexGenerate(index) => self.generate_descriptor_index = index,
-            Message::AmountSend(amount) => self.send_amount = amount,
-            Message::CountSend(count) => self.send_count = count,
+            Message::DescriptorIndexGenerate(index) => {
+                Self::u32_checked(index, &mut self.generate_descriptor_index, MAX_DERIV)
+            }
+            Message::AmountSend(amount) => Self::amount_checked(amount, &mut self.send_amount),
+            Message::CountSend(count) => Self::u32_checked(count, &mut self.send_count, u32::MAX),
             Message::AddressSend(address) => self.send_address = address,
             Message::DescriptorSend(descriptor) => self.send_descriptor = descriptor,
-            Message::DescriptorIndexSend(index) => self.send_descriptor_index = index,
-            Message::MinSend(min) => self.send_min = min,
-            Message::MaxSend(max) => self.send_max = max,
-            Message::BlockSend(blocks) => self.send_every_blocks = blocks,
-            Message::AutoblockBlocks(blocks) => self.autoblock_blocks = blocks,
+            Message::DescriptorIndexSend(index) => {
+                Self::u32_checked(index, &mut self.send_descriptor_index, MAX_DERIV)
+            }
+            Message::MinSend(min) => Self::amount_checked(min, &mut self.send_min),
+            Message::MaxSend(max) => Self::amount_checked(max, &mut self.send_max),
+            Message::BlockSend(blocks) => {
+                Self::u32_checked(blocks, &mut self.send_every_blocks, 10_000)
+            }
+            Message::AutoblockBlocks(blocks) => {
+                Self::u32_checked(blocks, &mut self.autoblock_blocks, 1_000)
+            }
             Message::AutoblockTimeframe(tf) => self.autoblocks_timeframe = tf,
 
             // Buttons
@@ -854,7 +949,7 @@ impl Application for Gui {
             Message::GenerateToRandom => self.generate_to_random(),
             Message::GenerateToDescriptor => self.generate_to_descriptor(),
             Message::SendToAddress => self.send_to_address(),
-            Message::SendToDescriptor => self.generate_to_descriptor(),
+            Message::SendToDescriptor => self.send_to_descriptor(),
             Message::SelectRpcAuth(selected) => {
                 if selected {
                     self.auth_type = AuthMethod::RpcAuth;
@@ -879,6 +974,7 @@ impl Application for Gui {
                     return focus_next();
                 }
             }
+            Message::ConsoleEdit(_) => {}
             Message::GenerateTarget(target) => self.generate_target = target,
         }
 
