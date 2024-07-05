@@ -1,3 +1,4 @@
+use core::time;
 use iced::widget::text_editor::{Action, Content, Edit};
 use iced::widget::{
     focus_next, focus_previous, scrollable, Button, Checkbox, Column, Container, PickList, Row,
@@ -5,14 +6,15 @@ use iced::widget::{
 };
 use iced::{executor, Application, Command, Element, Length, Subscription, Theme};
 use miniscript::bitcoin::{Address, Amount, Denomination};
+use miniscript::{Descriptor, DescriptorPublicKey};
 use std::fmt::Formatter;
 use std::fmt::{self, Display};
 use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::bitcoind::{
-    self, BitcoinMessage, BitcoindListener, GenerateToAddress, GenerateToDescriptor, SendToAddress,
-    SendToDescriptor,
+    self, BitcoinMessage, BitcoindListener, GenerateToAddress, GenerateToDescriptor,
+    SendEveryBlock, SendToAddress, SendToDescriptor,
 };
 
 const MAX_DERIV: u32 = 2u32.pow(31) - 1;
@@ -362,6 +364,64 @@ impl Gui {
             }))
         }
     }
+    pub fn toggle_every_blocks(&mut self, state: bool) {
+        self.send_every_blocks_enabled = state;
+        let count = u32::from_str(&self.send_count);
+        let min = Amount::from_str_in(&self.send_min, Denomination::Bitcoin);
+        let max = Amount::from_str_in(&self.send_max, Denomination::Bitcoin);
+        let descriptor =
+            if Descriptor::<DescriptorPublicKey>::from_str(&self.send_descriptor).is_ok() {
+                Some(self.send_descriptor.clone())
+            } else {
+                None
+            };
+        let start_index = u32::from_str(&self.send_descriptor_index);
+        let every_blocks = u32::from_str(&self.send_every_blocks);
+        if let (
+            Ok(count),
+            Ok(amount_min),
+            Ok(amount_max),
+            Some(descriptor),
+            Ok(start_index),
+            Ok(blocks),
+        ) = (count, min, max, descriptor, start_index, every_blocks)
+        {
+            self.send_to_bitcoind(BitcoinMessage::EnableSendEveryBlock(SendEveryBlock {
+                count,
+                amount_min,
+                amount_max,
+                descriptor,
+                start_index,
+                blocks,
+                actual_index: None,
+            }))
+        }
+    }
+
+    pub fn start_auto_block(&mut self) {
+        log::info!("GUI.start_auto_block()");
+        if !self.generate_wip && !self.send_wip && !self.autoblock_wip {
+            self.autoblock_wip = true;
+            let tf_ms = match self.autoblocks_timeframe {
+                TimeFrame::Second => 1_000,
+                TimeFrame::Minute => 60_000,
+            };
+            let blocks = u32::from_str(&self.autoblock_blocks).expect("input checked");
+            let delay = time::Duration::from_millis((tf_ms / blocks) as u64);
+            log::info!("start");
+            self.send_to_bitcoind(BitcoinMessage::StartAutoBlock(delay));
+        }
+
+        if self.send_every_blocks_enabled {
+            self.toggle_every_blocks(true);
+        }
+    }
+
+    pub fn stop_auto_block(&mut self) {
+        if self.autoblock_wip {
+            self.send_to_bitcoind(BitcoinMessage::StopAutoBlock);
+        }
+    }
 
     pub fn print(&mut self, mut msg: &str) {
         let mut msg = msg.to_string();
@@ -509,7 +569,8 @@ impl Gui {
             (false, false, true) => Self::button("Generate", Some(Message::StartAutoblock)),
             (false, true, true) => Self::button("Stop", Some(Message::StopAutoblock)),
             _ => Self::button("Generate", None),
-        };
+        }
+        .width(100);
 
         let wip = self.generate_wip || self.autoblock_wip || !self.connected;
 
@@ -541,7 +602,10 @@ impl Gui {
     }
 
     pub fn generate_panel(&self) -> Container<Message> {
-        let generate_signal = match (&self.generate_target, self.generate_wip || !self.connected) {
+        let generate_signal = match (
+            &self.generate_target,
+            self.generate_wip || !self.connected || self.autoblock_wip,
+        ) {
             (GenerateTarget::Address, false) => Some(Message::GenerateToAddress),
             (GenerateTarget::ToSelf, false) => Some(Message::GenerateToSelf),
             (GenerateTarget::Random, false) => Some(Message::GenerateToRandom),
@@ -549,7 +613,7 @@ impl Gui {
             _ => None,
         };
 
-        let generate_button = Self::button("Generate", generate_signal);
+        let generate_button = Self::button("Generate", generate_signal).width(100);
 
         let blocks_signal = if !self.generate_wip && self.connected {
             Some(Message::BlocksGenerate)
@@ -657,9 +721,11 @@ impl Gui {
             .balance
             .map(|balance| Text::new(format!("Balance: {}", balance)));
 
+        let enable = !self.send_wip && self.connected;
+
         let send_address_btn = Self::button(
             "Send",
-            if !self.send_wip && self.connected {
+            if enable {
                 Some(Message::SendToAddress)
             } else {
                 None
@@ -669,7 +735,7 @@ impl Gui {
 
         let amount_input = {
             let mut input = TextInput::new("amount", &self.send_amount).width(100);
-            if !self.send_wip && self.connected {
+            if enable {
                 input = input.on_input(Message::AmountSend);
             }
             input
@@ -677,15 +743,16 @@ impl Gui {
 
         let address_input = {
             let mut input = TextInput::new("address", &self.send_address).width(Length::Fill);
-            if !self.send_wip && self.connected {
+            if enable {
                 input = input.on_input(Message::AddressSend);
             }
             input
         };
 
+        let enable = !self.send_wip && self.connected && !self.send_every_blocks_enabled;
         let send_descriptor_btn = Self::button(
             "Send",
-            if !self.send_wip && self.connected {
+            if enable {
                 Some(Message::SendToDescriptor)
             } else {
                 None
@@ -695,7 +762,7 @@ impl Gui {
 
         let count_input = {
             let mut input = TextInput::new("count", &self.send_count);
-            if !self.send_wip && self.connected {
+            if enable {
                 input = input.on_input(Message::CountSend);
             }
             input
@@ -703,7 +770,7 @@ impl Gui {
 
         let min_input = {
             let mut input = TextInput::new("min", &self.send_min);
-            if !self.send_wip && self.connected {
+            if enable {
                 input = input.on_input(Message::MinSend);
             }
             input
@@ -711,7 +778,7 @@ impl Gui {
 
         let max_input = {
             let mut input = TextInput::new("max", &self.send_max);
-            if !self.send_wip && self.connected {
+            if enable {
                 input = input.on_input(Message::MaxSend);
             }
             input
@@ -719,7 +786,7 @@ impl Gui {
 
         let descriptor_input = {
             let mut input = TextInput::new("descriptor", &self.send_descriptor);
-            if !self.send_wip && self.connected {
+            if enable {
                 input = input.on_input(Message::DescriptorSend);
             }
             input
@@ -727,14 +794,14 @@ impl Gui {
 
         let descriptor_index_input = {
             let mut input = TextInput::new("start index", &self.send_descriptor_index).width(100);
-            if !self.send_wip && self.connected {
+            if enable {
                 input = input.on_input(Message::DescriptorIndexSend);
             }
             input
         };
 
         let every_block_checkbox = Checkbox::new("", self.send_every_blocks_enabled)
-            .on_toggle_maybe(if !self.send_wip && self.connected {
+            .on_toggle_maybe(if self.connected {
                 Some(Message::ToggleEveryBlock)
             } else {
                 None
@@ -742,7 +809,12 @@ impl Gui {
 
         let every_block_input = {
             let mut input = TextInput::new("blocks", &self.send_every_blocks).width(120);
-            if !self.send_wip && self.send_every_blocks_enabled && self.connected {
+            let enable = match self.autoblock_wip {
+                true => !self.send_every_blocks_enabled,
+                false => self.send_every_blocks_enabled && !self.send_wip,
+            };
+            let enable = enable && self.connected;
+            if enable {
                 input = input.on_input(Message::BlockSend);
             }
             input
@@ -875,7 +947,7 @@ impl Application for Gui {
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
-        log::info!("Gui::update({:?})", &message);
+        // log::info!("Gui::update({:?})", &message);
         match message {
             Message::GuiError(e) => {
                 if let Some(msg) = self.handle_gui_error(e) {
@@ -903,6 +975,7 @@ impl Application for Gui {
                     self.print(&msg);
                 }
                 BitcoinMessage::Connected(connected) => self.connected = connected,
+                BitcoinMessage::MinerStopped => self.autoblock_wip = false,
                 _ => {}
             },
 
@@ -942,8 +1015,10 @@ impl Application for Gui {
             Message::Disconnect => self.disconnect(),
             Message::PingRpcAuth => self.ping_rpc_auth(),
             Message::PingCookie => self.ping_cookie(),
-            Message::StartAutoblock => todo!(),
-            Message::StopAutoblock => todo!(),
+            Message::StartAutoblock => {
+                self.start_auto_block();
+            }
+            Message::StopAutoblock => self.stop_auto_block(),
             Message::GenerateToAddress => self.generate_to_address(),
             Message::GenerateToSelf => self.generate_to_self(),
             Message::GenerateToRandom => self.generate_to_random(),
@@ -965,7 +1040,7 @@ impl Application for Gui {
                 }
             }
             Message::ToggleEveryBlock(enable) => {
-                self.send_every_blocks_enabled = enable;
+                self.toggle_every_blocks(enable);
             }
             Message::KeyPressed(Key::Tab(shift)) => {
                 if shift {

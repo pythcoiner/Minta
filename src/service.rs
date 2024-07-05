@@ -1,9 +1,12 @@
-use async_channel::Sender;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc;
 
 #[allow(async_fn_in_trait)]
 pub trait ServiceFn<Message> {
-    fn new(sender: Sender<Message>, receiver: Receiver<Message>) -> Self;
+    fn new(
+        sender: async_channel::Sender<Message>,
+        receiver: mpsc::Receiver<Message>,
+        loopback: mpsc::Sender<Message>,
+    ) -> Self;
     async fn run(&mut self);
 }
 

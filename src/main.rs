@@ -57,7 +57,7 @@ async fn main() {
     let (gui_sender, bitcoin_receiver) = std::sync::mpsc::channel::<BitcoinMessage>();
     let (bitcoin_sender, gui_receiver) = async_channel::unbounded::<BitcoinMessage>();
 
-    let bitcoind = BitcoinD::new(bitcoin_sender, bitcoin_receiver);
+    let bitcoind = BitcoinD::new(bitcoin_sender, bitcoin_receiver, gui_sender.clone());
 
     let mut settings = Settings::with_flags(Flags {
         sender: gui_sender,

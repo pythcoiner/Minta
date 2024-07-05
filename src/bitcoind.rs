@@ -1,23 +1,21 @@
-use std::{fmt::format, path::PathBuf, str::FromStr, time::Duration};
-
-use bitcoincore_rpc::{
-    jsonrpc::{
-        error::RpcError,
-        serde_json::{from_str, Value},
-    },
-    Auth, Client, RpcApi,
+use std::{
+    path::PathBuf,
+    str::FromStr,
+    time::{self, Duration},
 };
+
+use bitcoincore_rpc::{jsonrpc::error::RpcError, Auth, Client, RpcApi};
 use miniscript::{
-    bitcoin::{
-        address::NetworkUnchecked, key::Secp256k1, secp256k1::All, Address, Amount, Network,
-        PrivateKey,
-    },
+    bitcoin::{secp256k1::All, Address, Amount, Network, PrivateKey},
     Descriptor, DescriptorPublicKey,
 };
 use rand::Rng;
-use regex::Regex;
 
-use crate::{gui::Message, gui::Message::Bitcoind, listener, service::ServiceFn};
+use crate::{
+    gui::Message::{self, Bitcoind},
+    listener,
+    service::ServiceFn,
+};
 
 const WALLET_NAME: &str = "regtest";
 
@@ -64,6 +62,18 @@ pub struct SendToDescriptor {
 
 #[derive(Debug, Clone)]
 #[allow(unused)]
+pub struct SendEveryBlock {
+    pub count: u32,
+    pub amount_min: Amount,
+    pub amount_max: Amount,
+    pub descriptor: String,
+    pub start_index: u32,
+    pub blocks: u32,
+    pub actual_index: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(unused)]
 pub enum BitcoinMessage {
     // GUI -> Service
     /// Check connection to bitcoind
@@ -94,6 +104,14 @@ pub enum BitcoinMessage {
     SendToAddress(SendToAddress),
     /// Send to bitcoin descriptor
     SendToDescriptor(SendToDescriptor),
+    /// Enable send every block feature
+    EnableSendEveryBlock(SendEveryBlock),
+    /// Disable send every block feature
+    DisableSendEveryBlock,
+    /// Start auto block generation
+    StartAutoBlock(Duration),
+    /// Stop auto block generation
+    StopAutoBlock,
 
     // Service -> GUI
     UpdateBlockchainTip(u64),
@@ -102,6 +120,13 @@ pub enum BitcoinMessage {
     SendResponse(bool),
     SendMessage(String),
     Connected(bool),
+
+    // Loopback message from subthreads
+    BlockMined,
+    FailMineBlock(String),
+    MinerStopped,
+
+    BatchSent,
 }
 
 #[derive(Debug)]
@@ -120,16 +145,24 @@ pub enum Error {
     Rpc(bitcoincore_rpc::Error),
 }
 
+#[derive(Debug, Clone)]
+pub enum AutoBlockMessage {
+    Stop,
+}
+
 #[allow(unused)]
 pub struct BitcoinD {
     sender: async_channel::Sender<BitcoinMessage>,
     receiver: std::sync::mpsc::Receiver<BitcoinMessage>,
+    loopback: std::sync::mpsc::Sender<BitcoinMessage>,
+    auto_block_sender: Option<std::sync::mpsc::Sender<AutoBlockMessage>>,
     client: Option<Client>,
     wallet_client: Option<Client>,
     address: Option<String>,
     auth: Option<AuthMethod>,
     mining_busy: bool,
     secp: miniscript::bitcoin::secp256k1::Secp256k1<All>,
+    send_every_block: Option<SendEveryBlock>,
 }
 
 #[allow(unused)]
@@ -151,6 +184,7 @@ impl BitcoinD {
                     Auth::UserPass(user.to_string(), password.to_string()),
                 ),
             };
+            log::info!("Client created!");
 
             let wallet_address = format!("{}/wallet/{}", address, WALLET_NAME);
             let wallet_client = match auth {
@@ -165,27 +199,33 @@ impl BitcoinD {
             }
             .map_err(Error::Rpc)?;
 
-            wallet_client
-                .call::<bool>("settxfee", &[0.0001.into()])
-                .map_err(Error::Rpc)?;
-
             match client {
                 Ok(client) => match client.load_wallet(WALLET_NAME) {
                     Ok(w) => Ok((client, wallet_client)),
                     Err(e) => {
+                        log::info!("Fail to load wallet...");
                         if let bitcoincore_rpc::Error::JsonRpc(
                             bitcoincore_rpc::jsonrpc::Error::Rpc(RpcError { code, .. }),
                         ) = e
                         {
                             // -18 => wallet does not exist
                             if code == -18 {
+                                log::info!("Wallet does not exists, creating it...");
+
                                 client
                                     .create_wallet(WALLET_NAME, None, None, None, None)
                                     .map_err(Error::Rpc)?;
-                            } else if code != -35 {
+                            } else if code == -35 {
                                 // -35 => wallet already loaded
+                                log::info!("Wallet already loaded!");
+                            } else {
                                 return Err(Error::Rpc(e));
                             }
+
+                            log::info!("Wallet client settxfee...");
+                            wallet_client
+                                .call::<bool>("settxfee", &[0.0001.into()])
+                                .map_err(Error::Rpc)?;
                             Ok((client, wallet_client))
                         } else {
                             Err(Error::Rpc(e))
@@ -229,14 +269,41 @@ impl BitcoinD {
         }
     }
 
-    pub fn get_random_address(&self) -> Address {
+    pub fn get_random_address(secp: &miniscript::bitcoin::secp256k1::Secp256k1<All>) -> Address {
         let prv = PrivateKey::generate(Network::Regtest);
-        let pb = prv.public_key(&self.secp);
+        let pb = prv.public_key(secp);
         Address::p2pkh(pb, Network::Regtest)
     }
 
+    pub fn get_random_tx_count(send: u32, block: u32) -> u32 {
+        const MULTIPLIER: i32 = 10_000;
+        const MAX_TX_PER_BLOCK: i32 = 10_000;
+        let send_per_block =
+            ((send as f64 / block as f64).min(MAX_TX_PER_BLOCK as f64) * MULTIPLIER as f64) as i32;
+
+        let mut rng = rand::thread_rng();
+
+        if send_per_block <= MULTIPLIER {
+            // less than one tx/block
+            let random = rng.gen_range(0..MULTIPLIER);
+            if random > send_per_block {
+                1
+            } else {
+                0
+            }
+        } else {
+            // more than one tx per block
+            let random = rng.gen_range(0..send_per_block);
+            if random > MULTIPLIER {
+                (random / MULTIPLIER) as u32
+            } else {
+                0
+            }
+        }
+    }
+
     pub fn generate(&self, blocks: u32) -> Result<(), Error> {
-        let address = self.get_random_address();
+        let address = Self::get_random_address(&self.secp);
         self.generate_to_address(GenerateToAddress { blocks, address })?;
         Ok(())
     }
@@ -251,16 +318,6 @@ impl BitcoinD {
             Err(Error::NotConnected)
         }
     }
-
-    // pub fn get_new_address(&self) -> Result<Address<NetworkUnchecked>, Error> {
-    //     if let Some(client) = self.client.as_ref() {
-    //         let info = client.
-    //             .map_err(|e| Error::Rpc(e))?
-    //             .
-    //     } else {
-    //         Err(Error::GetNewAddress)
-    //     }
-    // }
 
     pub fn generate_to_self(&self, blocks: u32) -> Result<(), Error> {
         if let Some(client) = self.wallet_client.as_ref() {
@@ -280,14 +337,14 @@ impl BitcoinD {
             Descriptor::from_str(&params.descriptor).map_err(|_| Error::ParseDescriptor)?;
 
         for index in start..end {
-            let address = self.address_from_descriptor(descriptor.clone(), index)?;
+            let address = Self::address_from_descriptor(&self.secp, descriptor.clone(), index)?;
             self.generate_to_address(GenerateToAddress { blocks: 1, address })?;
         }
         Ok(())
     }
 
     pub fn address_from_descriptor(
-        &self,
+        secp: &miniscript::bitcoin::secp256k1::Secp256k1<All>,
         descriptor: Descriptor<DescriptorPublicKey>,
         index: u32,
     ) -> Result<Address, Error> {
@@ -298,7 +355,7 @@ impl BitcoinD {
             // we take the first multipath as receive path
             .next()
             .ok_or(Error::ParseDescriptor)?
-            .derived_descriptor(&self.secp, index)
+            .derived_descriptor(secp, index)
             .map_err(|_| Error::DeriveDescriptor)?
             .address(Network::Regtest)
             .map_err(|_| Error::DeriveDescriptor)
@@ -330,9 +387,34 @@ impl BitcoinD {
             .map_err(|_| Error::DeriveDescriptor)?;
         for index in start..end {
             let amount = Self::random_amount(params.amount_min, params.amount_max);
-            let address = self.address_from_descriptor(descriptor.clone(), index)?;
+            let address = Self::address_from_descriptor(&self.secp, descriptor.clone(), index)?;
             self.send_to_address(SendToAddress { amount, address })?;
         }
+        Ok(())
+    }
+
+    pub fn maybe_send_every_block(&mut self) -> Result<(), Error> {
+        if let Some(params) = self.send_every_block.as_mut() {
+            let tx_count = Self::get_random_tx_count(params.count, params.blocks);
+
+            let start = if let Some(index) = params.actual_index {
+                index
+            } else {
+                params.start_index
+            };
+            let end = start + tx_count;
+            params.actual_index = Some(end);
+            let (min, max) = (params.amount_min, params.amount_max);
+            let descriptor = params.descriptor.clone();
+            for index in start..end {
+                let amount = Self::random_amount(min, max);
+                let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&descriptor)
+                    .map_err(|_| Error::ParseDescriptor)?;
+                let address = Self::address_from_descriptor(&self.secp, descriptor, index)?;
+                self.send_to_address(SendToAddress { amount, address })?;
+            }
+        }
+
         Ok(())
     }
 
@@ -448,11 +530,114 @@ impl BitcoinD {
                     self.send_to_gui(BitcoinMessage::SendResponse(true));
                 }
             }
+            (BitcoinMessage::BlockMined, _) => {
+                if let Err(e) = self.maybe_send_every_block() {
+                    self.send_to_gui(BitcoinMessage::SendMessage(format!(
+                        "maybe_send_every_block(): {:?}",
+                        e
+                    )));
+                }
+                self.update_data();
+            }
+            (BitcoinMessage::MinerStopped, _) => {
+                self.auto_block_sender = None;
+                self.send_to_gui(BitcoinMessage::MinerStopped);
+            }
+            (BitcoinMessage::BatchSent, _) => {
+                self.update_data();
+            }
+            (BitcoinMessage::EnableSendEveryBlock(params), _) => {
+                self.send_every_block = Some(params);
+            }
+            (BitcoinMessage::DisableSendEveryBlock, _) => {
+                self.send_every_block = None;
+            }
+            (BitcoinMessage::StartAutoBlock(delay), _) => {
+                log::info!("start auto block");
+                if let Err(e) = self.start_auto_block(delay) {
+                    self.send_to_gui(BitcoinMessage::MinerStopped);
+                    self.send_to_gui(BitcoinMessage::SendMessage(format!(
+                        "Fail to start autoblock: {:?}",
+                        e
+                    )));
+                }
+            }
+            (BitcoinMessage::StopAutoBlock, _) => {
+                self.stop_auto_block();
+            }
 
-            _ => {} // BitcoinMessage::UpdateBlockchainTip(_) => todo!(),
-                    // BitcoinMessage::UpdateBalance(_) => todo!(),
-                    // BitcoinMessage::GenerateResponse(_) => todo!(),
-                    // BitcoinMessage::SendResponse() => todo
+            _ => {
+                log::info!("Bitcoind: unhandled message!!!");
+            } // BitcoinMessage::UpdateBlockchainTip(_) => todo!(),
+              // BitcoinMessage::UpdateBalance(_) => todo!(),
+              // BitcoinMessage::GenerateResponse(_) => todo!(),
+              // BitcoinMessage::SendResponse() => todo
+        }
+    }
+
+    pub fn start_auto_block(&mut self, delay_ms: Duration) -> Result<(), Error> {
+        log::info!("BitcoinD.start_auto_block({:?})", delay_ms);
+        if self.is_connected() {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            self.auto_block_sender = Some(sender);
+            let sender = self.loopback.clone();
+            let (client, _) = self.connect()?;
+
+            tokio::spawn(async move {
+                log::info!("Spawn miner thread");
+                let mut last_block = time::Instant::now();
+                let mut stop = false;
+                let secp = miniscript::bitcoin::secp256k1::Secp256k1::new();
+
+                while !stop {
+                    #[allow(clippy::collapsible_match)]
+                    if let Ok(msg) = receiver.try_recv() {
+                        log::info!("Miner rcv msg: {:?}", msg);
+                        #[allow(irrefutable_let_patterns)]
+                        if let AutoBlockMessage::Stop = msg {
+                            stop = true;
+                            continue;
+                        }
+                    }
+                    let now = time::Instant::now();
+                    if now > last_block + delay_ms {
+                        log::info!("Miner: mine a block");
+                        last_block = now;
+
+                        let address = Self::get_random_address(&secp);
+                        match client.generate_to_address(1, &address) {
+                            Ok(_) => {
+                                if let Err(e) = sender.send(BitcoinMessage::BlockMined) {
+                                    log::error!("Fail to snd message from miner to BitcoinD!");
+                                }
+                            }
+                            Err(e) => {
+                                if let Err(e) =
+                                    sender.send(BitcoinMessage::FailMineBlock(format!("{:?}", e)))
+                                {
+                                    log::error!("Fail to snd message from miner to BitcoinD!");
+                                }
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_nanos(20)).await;
+                }
+
+                log::info!("Miner stopped");
+                if let Err(e) = sender.send(BitcoinMessage::MinerStopped) {
+                    log::error!("Fail to snd message from miner to BitcoinD!");
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn stop_auto_block(&self) {
+        if let Some(sender) = self.auto_block_sender.as_ref() {
+            if let Err(e) = sender.send(AutoBlockMessage::Stop) {
+                log::error!("Fail to snd message from miner to miner!");
+            }
         }
     }
 
@@ -483,16 +668,20 @@ impl ServiceFn<BitcoinMessage> for BitcoinD {
     fn new(
         sender: async_channel::Sender<BitcoinMessage>,
         receiver: std::sync::mpsc::Receiver<BitcoinMessage>,
+        loopback: std::sync::mpsc::Sender<BitcoinMessage>,
     ) -> Self {
         BitcoinD {
             sender,
             receiver,
+            loopback,
             client: None,
             wallet_client: None,
             address: None,
             auth: None,
             mining_busy: false,
             secp: miniscript::bitcoin::secp256k1::Secp256k1::new(),
+            send_every_block: None,
+            auto_block_sender: None,
         }
     }
 
