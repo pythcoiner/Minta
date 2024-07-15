@@ -193,7 +193,7 @@ impl BitcoinD {
                     Client::new(&wallet_address, Auth::CookieFile(cookie_path))
                 }
                 AuthMethod::RpcAuth { user, password } => Client::new(
-                    address,
+                    &wallet_address,
                     Auth::UserPass(user.to_string(), password.to_string()),
                 ),
             }
