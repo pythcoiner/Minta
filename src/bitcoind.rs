@@ -22,21 +22,18 @@ const WALLET_NAME: &str = "regtest";
 listener!(BitcoindListener, BitcoinMessage, Message, Bitcoind);
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
 pub enum AuthMethod {
     Cookie { cookie_path: String },
     RpcAuth { user: String, password: String },
 }
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
 pub struct GenerateToAddress {
     pub blocks: u32,
     pub address: Address,
 }
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
 pub struct GenerateToDescriptor {
     pub blocks: u32,
     pub descriptor: String,
@@ -44,14 +41,12 @@ pub struct GenerateToDescriptor {
 }
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
 pub struct SendToAddress {
     pub amount: Amount,
     pub address: Address,
 }
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
 pub struct SendToDescriptor {
     pub count: u32,
     pub amount_min: Amount,
@@ -61,7 +56,6 @@ pub struct SendToDescriptor {
 }
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
 pub struct SendEveryBlock {
     pub count: u32,
     pub amount_min: Amount,
@@ -73,14 +67,8 @@ pub struct SendEveryBlock {
 }
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
 pub enum BitcoinMessage {
     // GUI -> Service
-    /// Check connection to bitcoind
-    Ping {
-        address: String,
-        auth: AuthMethod,
-    },
     /// Set credentials
     SetCredentials {
         address: String,
@@ -130,18 +118,11 @@ pub enum BitcoinMessage {
 }
 
 #[derive(Debug)]
-#[allow(unused)]
 pub enum Error {
-    WrongAddress,
-    WrongAuth,
     CredentialMissing,
     NotConnected,
-    ParseAddressFail,
     ParseDescriptor,
     DeriveDescriptor,
-    Network,
-    SetTxFee,
-    GetNewAddress,
     Rpc(bitcoincore_rpc::Error),
 }
 
@@ -150,7 +131,6 @@ pub enum AutoBlockMessage {
     Stop,
 }
 
-#[allow(unused)]
 pub struct BitcoinD {
     sender: async_channel::Sender<BitcoinMessage>,
     receiver: std::sync::mpsc::Receiver<BitcoinMessage>,
@@ -165,13 +145,7 @@ pub struct BitcoinD {
     send_every_block: Option<SendEveryBlock>,
 }
 
-#[allow(unused)]
 impl BitcoinD {
-    pub fn set_credentials(&mut self, address: String, auth: AuthMethod) {
-        self.address = Some(address);
-        self.auth = Some(auth);
-    }
-
     pub fn connect(&self) -> Result<(Client, Client), Error> {
         if let (Some(address), Some(auth)) = (&self.address, &self.auth) {
             let client = match auth {
@@ -201,7 +175,7 @@ impl BitcoinD {
 
             match client {
                 Ok(client) => match client.load_wallet(WALLET_NAME) {
-                    Ok(w) => Ok((client, wallet_client)),
+                    Ok(_) => Ok((client, wallet_client)),
                     Err(e) => {
                         log::info!("Fail to load wallet...");
                         if let bitcoincore_rpc::Error::JsonRpc(
@@ -454,9 +428,7 @@ impl BitcoinD {
     }
 
     pub fn handle_message(&mut self, msg: BitcoinMessage) {
-        log::info!("BitcoinD.handle_message({:?})", msg);
         match (msg, &self.mining_busy) {
-            (BitcoinMessage::Ping { address, auth }, _) => todo!(),
             (BitcoinMessage::SetCredentials { address, auth }, _) => {
                 self.address = Some(address);
                 self.auth = Some(auth);
@@ -568,10 +540,7 @@ impl BitcoinD {
 
             _ => {
                 log::info!("Bitcoind: unhandled message!!!");
-            } // BitcoinMessage::UpdateBlockchainTip(_) => todo!(),
-              // BitcoinMessage::UpdateBalance(_) => todo!(),
-              // BitcoinMessage::GenerateResponse(_) => todo!(),
-              // BitcoinMessage::SendResponse() => todo
+            }
         }
     }
 
@@ -608,14 +577,20 @@ impl BitcoinD {
                         match client.generate_to_address(1, &address) {
                             Ok(_) => {
                                 if let Err(e) = sender.send(BitcoinMessage::BlockMined) {
-                                    log::error!("Fail to snd message from miner to BitcoinD!");
+                                    log::error!(
+                                        "Fail to snd message from miner to BitcoinD: {}",
+                                        e
+                                    );
                                 }
                             }
                             Err(e) => {
                                 if let Err(e) =
                                     sender.send(BitcoinMessage::FailMineBlock(format!("{:?}", e)))
                                 {
-                                    log::error!("Fail to snd message from miner to BitcoinD!");
+                                    log::error!(
+                                        "Fail to snd message from miner to BitcoinD: {}",
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -625,7 +600,7 @@ impl BitcoinD {
 
                 log::info!("Miner stopped");
                 if let Err(e) = sender.send(BitcoinMessage::MinerStopped) {
-                    log::error!("Fail to snd message from miner to BitcoinD!");
+                    log::error!("Fail to snd message from miner to BitcoinD: {}", e);
                 }
             });
         }
@@ -636,7 +611,7 @@ impl BitcoinD {
     pub fn stop_auto_block(&self) {
         if let Some(sender) = self.auto_block_sender.as_ref() {
             if let Err(e) = sender.send(AutoBlockMessage::Stop) {
-                log::error!("Fail to snd message from miner to miner!");
+                log::error!("Fail to snd message from miner to miner: {}", e);
             }
         }
     }
@@ -709,7 +684,7 @@ mod tests {
 
         let descriptor = Descriptor::<DescriptorPublicKey>::from_str(DESCRIPTOR).unwrap();
 
-        let addr = descriptor
+        let _addr = descriptor
             .into_single_descriptors()
             .unwrap()
             .into_iter()
@@ -719,9 +694,5 @@ mod tests {
             .unwrap()
             .address(Network::Regtest)
             .unwrap();
-
-        println!("address: {}", addr);
-
-        // let addr = BitcoinD::address_from_descriptor(DESCRIPTOR, 1, &secp);
     }
 }

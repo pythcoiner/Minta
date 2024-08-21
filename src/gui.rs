@@ -1,16 +1,25 @@
 use core::time;
-use iced::widget::text_editor::{Action, Content, Edit};
-use iced::widget::{
-    focus_next, focus_previous, scrollable, Button, Checkbox, Column, Container, PickList, Row,
-    Rule, Space, Text, TextEditor, TextInput,
+use iced::{
+    executor,
+    widget::{
+        focus_next, focus_previous, scrollable,
+        text_editor::{Action, Content, Edit},
+        Button, Checkbox, Column, Container, PickList, Row, Rule, Space, Text, TextEditor,
+        TextInput,
+    },
+    Application, Command, Element, Length, Subscription, Theme,
 };
-use iced::{executor, Application, Command, Element, Length, Subscription, Theme};
-use miniscript::bitcoin::{Address, Amount, Denomination};
-use miniscript::{Descriptor, DescriptorPublicKey};
-use std::fmt::Formatter;
-use std::fmt::{self, Display};
-use std::str::FromStr;
-use std::sync::Arc;
+use miniscript::{
+    bitcoin::{Address, Amount, Denomination},
+    Descriptor, DescriptorPublicKey,
+};
+use std::{
+    env,
+    fmt::{self, Display, Formatter},
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+};
 
 use crate::bitcoind::{
     self, BitcoinMessage, BitcoindListener, GenerateToAddress, GenerateToDescriptor,
@@ -20,32 +29,12 @@ use crate::bitcoind::{
 const MAX_DERIV: u32 = 2u32.pow(31) - 1;
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
-pub enum GuiError {
-    None,
-}
-
-impl fmt::Display for GuiError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        #[allow(clippy::match_single_binding)]
-        match self {
-            // TODO
-            _ => {
-                write!(f, "")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub enum Key {
     Tab(bool),
 }
 
 #[derive(Debug, Clone)]
-#[allow(unused)]
 pub enum Message {
-    GuiError(GuiError),
     Bitcoind(BitcoinMessage),
 
     // text inputs
@@ -76,8 +65,6 @@ pub enum Message {
     ConnectRpcAuth,
     ConnectCookie,
     Disconnect,
-    PingRpcAuth,
-    PingCookie,
     StartAutoblock,
     StopAutoblock,
     GenerateToAddress,
@@ -92,7 +79,6 @@ pub enum Message {
 }
 
 #[derive(Debug)]
-#[allow(unused)]
 pub struct Flags {
     pub receiver: async_channel::Receiver<BitcoinMessage>,
     pub sender: std::sync::mpsc::Sender<BitcoinMessage>,
@@ -196,17 +182,7 @@ pub struct Gui {
     console: Content,
 }
 
-#[allow(unused)]
 impl Gui {
-    fn init(&mut self) {}
-
-    fn command(msg: Message) -> Command<Message> {
-        Command::perform(
-            async { msg },
-            |message| message, // This just forwards the message
-        )
-    }
-
     fn button(text: &str, msg: Option<Message>) -> Button<'static, Message> {
         let w = (text.len() * 10) as f32;
         let mut button = Button::new(
@@ -225,12 +201,7 @@ impl Gui {
         if let Some(msg) = msg {
             button = button.on_press(msg)
         }
-
         button
-    }
-
-    pub fn handle_gui_error(&mut self, error: GuiError) -> Option<Message> {
-        todo!()
     }
 
     pub fn send_to_bitcoind(&mut self, msg: BitcoinMessage) {
@@ -241,14 +212,6 @@ impl Gui {
 
     pub fn disconnect(&mut self) {
         self.send_to_bitcoind(BitcoinMessage::Disconnect)
-    }
-
-    pub fn ping_rpc_auth(&self) {
-        // TODO:
-    }
-
-    pub fn ping_cookie(&self) {
-        // TODO:
     }
 
     pub fn connect_rpc_auth(&mut self) {
@@ -423,7 +386,7 @@ impl Gui {
         }
     }
 
-    pub fn print(&mut self, mut msg: &str) {
+    pub fn print(&mut self, msg: &str) {
         let mut msg = msg.to_string();
         if !msg.ends_with('\n') {
             msg.push('\n');
@@ -446,22 +409,6 @@ impl Gui {
             (_, true) => (false, false),
             (AuthMethod::RpcAuth, false) => (false, true),
             (AuthMethod::Cookie, false) => (true, false),
-        };
-
-        let ping = if !self.connected {
-            Some(Self::button(
-                "Test Connection",
-                if self.credentials_valid() {
-                    Some(match self.auth_type {
-                        AuthMethod::RpcAuth => Message::PingRpcAuth,
-                        AuthMethod::Cookie => Message::PingCookie,
-                    })
-                } else {
-                    None
-                },
-            ))
-        } else {
-            None
         };
 
         let connect = if self.connected {
@@ -535,7 +482,6 @@ impl Gui {
             .push(
                 Row::new()
                     .push(Space::with_width(Length::Fill))
-                    .push_maybe(ping)
                     .push_maybe(if !self.connected {
                         Some(Space::with_width(Length::Fill))
                     } else {
@@ -879,7 +825,7 @@ impl Gui {
         Container::new(scrollable(console).height(300))
     }
 
-    pub fn u32_checked(mut input: String, output: &mut String, max: u32) {
+    pub fn u32_checked(input: String, output: &mut String, max: u32) {
         if let Ok(blocks) = u32::from_str(&input) {
             if blocks <= max {
                 *output = input;
@@ -888,13 +834,35 @@ impl Gui {
             *output = input;
         }
     }
-    pub fn amount_checked(mut input: String, output: &mut String) {
+    pub fn amount_checked(input: String, output: &mut String) {
         if Amount::from_str_in(&input, miniscript::bitcoin::Denomination::Bitcoin).is_ok()
             || input.is_empty()
         {
             *output = input;
         }
     }
+}
+
+fn bitcoind_cookie_path() -> String {
+    #[cfg(target_os = "windows")]
+    let mut path = {
+        let mut path = env::var("APPDATA").map(PathBuf::from).unwrap();
+        path.push("Bitcoin");
+        path.push(".cookie");
+        path
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let path = {
+        let mut path = env::var("HOME")
+            .map(PathBuf::from)
+            .expect("$HOME should exists");
+        path.push(".bitcoin");
+        path.push(".cookie");
+        path
+    };
+
+    path.to_str().expect("cookie path should be ok").to_string()
 }
 
 impl Application for Gui {
@@ -904,13 +872,13 @@ impl Application for Gui {
     type Flags = Flags;
 
     fn new(flags: Self::Flags) -> (Self, Command<Message>) {
-        let mut gui = Gui {
+        let gui = Gui {
             receiver: flags.receiver,
             sender: flags.sender,
-            auth_type: AuthMethod::Cookie,
-            user: "".to_string(),
-            password: "".to_string(),
-            cookie_path: "/home/pyth/.bitcoin/regtest/.cookie".to_string(),
+            auth_type: AuthMethod::RpcAuth,
+            user: "user".to_string(),
+            password: "password".to_string(),
+            cookie_path: bitcoind_cookie_path(),
             block_height: Some(0),
             balance: Some(Amount::ZERO),
             generate_blocks: "".to_string(),
@@ -937,8 +905,6 @@ impl Application for Gui {
             console: Content::new(),
         };
 
-        gui.init();
-
         (gui, Command::none())
     }
 
@@ -947,13 +913,7 @@ impl Application for Gui {
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
-        // log::info!("Gui::update({:?})", &message);
         match message {
-            Message::GuiError(e) => {
-                if let Some(msg) = self.handle_gui_error(e) {
-                    return Gui::command(msg);
-                }
-            }
             Message::Bitcoind(message) => match message {
                 BitcoinMessage::UpdateBlockchainTip(block_height) => {
                     self.block_height = Some(block_height)
@@ -1013,8 +973,6 @@ impl Application for Gui {
             Message::ConnectRpcAuth => self.connect_rpc_auth(),
             Message::ConnectCookie => self.connect_cookie(),
             Message::Disconnect => self.disconnect(),
-            Message::PingRpcAuth => self.ping_rpc_auth(),
-            Message::PingCookie => self.ping_cookie(),
             Message::StartAutoblock => {
                 self.start_auto_block();
             }

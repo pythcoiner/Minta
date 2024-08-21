@@ -49,7 +49,6 @@ async fn main() {
         })
         .level(log::LevelFilter::Error)
         .level_for("regtest_gui", log::LevelFilter::Info)
-        // .level_for("modbus485_debugger", log::LevelFilter::Debug)
         .chain(std::io::stdout())
         .apply()
         .unwrap();
