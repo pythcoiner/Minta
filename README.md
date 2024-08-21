@@ -1,4 +1,4 @@
-# Regtest Gui
+# Minta
 
 This GUI is an helper to control a bitcoin regtest with some automation features.
 

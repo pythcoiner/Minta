@@ -13,9 +13,11 @@ use miniscript::{
     bitcoin::{Address, Amount, Denomination},
     Descriptor, DescriptorPublicKey,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     env,
     fmt::{self, Display, Formatter},
+    fs,
     path::PathBuf,
     str::FromStr,
     sync::Arc,
@@ -27,6 +29,105 @@ use crate::bitcoind::{
 };
 
 const MAX_DERIV: u32 = 2u32.pow(31) - 1;
+
+fn bitcoind_default_cookie_path() -> String {
+    #[cfg(target_os = "windows")]
+    let mut path = {
+        let mut path = env::var("APPDATA").map(PathBuf::from).unwrap();
+        path.push("Bitcoin");
+        path.push(".cookie");
+        path
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let path = {
+        let mut path = env::var("HOME")
+            .map(PathBuf::from)
+            .expect("$HOME should exists");
+        path.push(".bitcoin");
+        path.push(".cookie");
+        path
+    };
+
+    path.to_str().expect("cookie path should be ok").to_string()
+}
+
+fn config_path() -> String {
+    #[cfg(target_os = "windows")]
+    let mut path = {
+        let mut path = env::var("APPDATA").map(PathBuf::from).unwrap();
+        path.push("Minta");
+        path.push("minta.conf");
+        path
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let path = {
+        let mut path = env::var("HOME")
+            .map(PathBuf::from)
+            .expect("$HOME should exists");
+        path.push(".minta");
+        path.push("minta.conf");
+        path
+    };
+
+    path.to_str().expect("path should be ok").to_string()
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Config {
+    pub bitcoind: BitcoindConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BitcoindConfig {
+    pub auth_type: AuthMethod,
+    pub user: String,
+    pub password: String,
+    pub cookie_path: String,
+    pub address: String,
+}
+
+impl Default for BitcoindConfig {
+    fn default() -> Self {
+        Self {
+            auth_type: AuthMethod::default(),
+            user: "user".into(),
+            password: "password".into(),
+            cookie_path: bitcoind_default_cookie_path(),
+            address: "127.0.0.1:18443".into(),
+        }
+    }
+}
+
+impl Config {
+    pub fn new() -> Self {
+        if let Ok(file) = fs::File::open(config_path()) {
+            if let Ok(config) = serde_yaml::from_reader(file) {
+                return config;
+            }
+        }
+        Self::default()
+    }
+
+    pub fn save(&self) -> Result<(), String> {
+        log::info!("save({})", config_path());
+        let path = config_path();
+        let p = PathBuf::from(config_path());
+        let parent = p.parent().to_owned().expect("Folder should exists");
+        if !parent.exists() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(file) = fs::File::create(path) {
+            match serde_yaml::to_writer(file, self) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("Failed to write config file: {}", e)),
+            }
+        } else {
+            Err("Failed to open config file".to_string())
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Key {
@@ -84,7 +185,9 @@ pub struct Flags {
     pub sender: std::sync::mpsc::Sender<BitcoinMessage>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub enum AuthMethod {
+    #[default]
     RpcAuth,
     Cookie,
 }
@@ -152,11 +255,7 @@ impl FromStr for TimeFrame {
 pub struct Gui {
     receiver: async_channel::Receiver<BitcoinMessage>,
     sender: std::sync::mpsc::Sender<BitcoinMessage>,
-    bitcoind_address: String,
-    auth_type: AuthMethod,
-    user: String,
-    password: String,
-    cookie_path: String,
+    config: Config,
     block_height: Option<u64>,
     balance: Option<Amount>,
     generate_target: GenerateTarget,
@@ -216,10 +315,10 @@ impl Gui {
 
     pub fn connect_rpc_auth(&mut self) {
         let msg = BitcoinMessage::SetCredentials {
-            address: self.bitcoind_address.clone(),
+            address: self.config.bitcoind.address.clone(),
             auth: bitcoind::AuthMethod::RpcAuth {
-                user: self.user.clone(),
-                password: self.password.clone(),
+                user: self.config.bitcoind.user.clone(),
+                password: self.config.bitcoind.password.clone(),
             },
         };
 
@@ -229,9 +328,9 @@ impl Gui {
 
     pub fn connect_cookie(&mut self) {
         let msg = BitcoinMessage::SetCredentials {
-            address: self.bitcoind_address.clone(),
+            address: self.config.bitcoind.address.clone(),
             auth: bitcoind::AuthMethod::Cookie {
-                cookie_path: self.cookie_path.clone(),
+                cookie_path: self.config.bitcoind.cookie_path.clone(),
             },
         };
 
@@ -240,13 +339,16 @@ impl Gui {
     }
 
     pub fn credentials_valid(&self) -> bool {
-        match self.auth_type {
+        match self.config.bitcoind.auth_type {
             AuthMethod::RpcAuth => {
-                !self.user.is_empty()
-                    && !self.password.is_empty()
-                    && !self.bitcoind_address.is_empty()
+                !self.config.bitcoind.user.is_empty()
+                    && !self.config.bitcoind.password.is_empty()
+                    && !self.config.bitcoind.address.is_empty()
             }
-            AuthMethod::Cookie => !self.cookie_path.is_empty() && !self.bitcoind_address.is_empty(),
+            AuthMethod::Cookie => {
+                !self.config.bitcoind.cookie_path.is_empty()
+                    && !self.config.bitcoind.address.is_empty()
+            }
         }
     }
 
@@ -398,14 +500,15 @@ impl Gui {
 
     pub fn auth_panel(&self) -> Container<Message> {
         let address_input = {
-            let mut input = TextInput::new("bitcoind address", &self.bitcoind_address).width(310);
+            let mut input =
+                TextInput::new("bitcoind address", &self.config.bitcoind.address).width(310);
             if !self.connected {
                 input = input.on_input(Message::BitcoindAddress);
             }
             input
         };
 
-        let (cookie, rpc_auth) = match (&self.auth_type, self.connected) {
+        let (cookie, rpc_auth) = match (&self.config.bitcoind.auth_type, self.connected) {
             (_, true) => (false, false),
             (AuthMethod::RpcAuth, false) => (false, true),
             (AuthMethod::Cookie, false) => (true, false),
@@ -416,7 +519,7 @@ impl Gui {
         } else {
             Self::button(
                 "Connect",
-                match (&self.auth_type, self.credentials_valid()) {
+                match (&self.config.bitcoind.auth_type, self.credentials_valid()) {
                     (_, false) => None,
                     (AuthMethod::RpcAuth, true) => Some(Message::ConnectRpcAuth),
                     (AuthMethod::Cookie, true) => Some(Message::ConnectCookie),
@@ -449,7 +552,8 @@ impl Gui {
                     .push("RpcAuth")
                     .push(Space::with_width(Length::Fill))
                     .push({
-                        let mut input = TextInput::new("user", &self.user).width(150);
+                        let mut input =
+                            TextInput::new("user", &self.config.bitcoind.user).width(150);
                         if rpc_auth {
                             input = input.on_input(Message::User);
                         }
@@ -457,7 +561,8 @@ impl Gui {
                     })
                     .push(Space::with_width(10))
                     .push({
-                        let mut input = TextInput::new("password", &self.password).width(150);
+                        let mut input =
+                            TextInput::new("password", &self.config.bitcoind.password).width(150);
                         if rpc_auth {
                             input = input.on_input(Message::Password);
                         }
@@ -471,7 +576,9 @@ impl Gui {
                     .push("Cookie")
                     .push(Space::with_width(Length::Fill))
                     .push({
-                        let mut input = TextInput::new("cookie path", &self.cookie_path).width(310);
+                        let mut input =
+                            TextInput::new("cookie path", &self.config.bitcoind.cookie_path)
+                                .width(310);
                         if cookie {
                             input = input.on_input(Message::CookiePath);
                         }
@@ -843,28 +950,6 @@ impl Gui {
     }
 }
 
-fn bitcoind_cookie_path() -> String {
-    #[cfg(target_os = "windows")]
-    let mut path = {
-        let mut path = env::var("APPDATA").map(PathBuf::from).unwrap();
-        path.push("Bitcoin");
-        path.push(".cookie");
-        path
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let path = {
-        let mut path = env::var("HOME")
-            .map(PathBuf::from)
-            .expect("$HOME should exists");
-        path.push(".bitcoin");
-        path.push(".cookie");
-        path
-    };
-
-    path.to_str().expect("cookie path should be ok").to_string()
-}
-
 impl Application for Gui {
     type Executor = executor::Default;
     type Message = Message;
@@ -875,10 +960,7 @@ impl Application for Gui {
         let gui = Gui {
             receiver: flags.receiver,
             sender: flags.sender,
-            auth_type: AuthMethod::RpcAuth,
-            user: "user".to_string(),
-            password: "password".to_string(),
-            cookie_path: bitcoind_cookie_path(),
+            config: Config::new(),
             block_height: Some(0),
             balance: Some(Amount::ZERO),
             generate_blocks: "".to_string(),
@@ -901,7 +983,6 @@ impl Application for Gui {
             generate_wip: false,
             send_wip: false,
             generate_target: GenerateTarget::Address,
-            bitcoind_address: "127.0.0.1:18443".to_string(),
             console: Content::new(),
         };
 
@@ -909,7 +990,7 @@ impl Application for Gui {
     }
 
     fn title(&self) -> String {
-        "RegtestGui".to_string()
+        "Minta".to_string()
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
@@ -934,16 +1015,23 @@ impl Application for Gui {
                 BitcoinMessage::SendMessage(msg) => {
                     self.print(&msg);
                 }
-                BitcoinMessage::Connected(connected) => self.connected = connected,
+                BitcoinMessage::Connected(connected) => {
+                    self.connected = connected;
+                    if connected {
+                        if let Err(e) = self.config.save() {
+                            self.print(&e);
+                        }
+                    }
+                }
                 BitcoinMessage::MinerStopped => self.autoblock_wip = false,
                 _ => {}
             },
 
             // text Inputs
-            Message::BitcoindAddress(address) => self.bitcoind_address = address,
-            Message::User(user) => self.user = user,
-            Message::Password(pass) => self.password = pass,
-            Message::CookiePath(path) => self.cookie_path = path,
+            Message::BitcoindAddress(address) => self.config.bitcoind.address = address,
+            Message::User(user) => self.config.bitcoind.user = user,
+            Message::Password(pass) => self.config.bitcoind.password = pass,
+            Message::CookiePath(path) => self.config.bitcoind.cookie_path = path,
             Message::BlocksGenerate(blocks) => {
                 Self::u32_checked(blocks, &mut self.generate_blocks, 10_000)
             }
@@ -985,16 +1073,16 @@ impl Application for Gui {
             Message::SendToDescriptor => self.send_to_descriptor(),
             Message::SelectRpcAuth(selected) => {
                 if selected {
-                    self.auth_type = AuthMethod::RpcAuth;
+                    self.config.bitcoind.auth_type = AuthMethod::RpcAuth;
                 } else {
-                    self.auth_type = AuthMethod::Cookie;
+                    self.config.bitcoind.auth_type = AuthMethod::Cookie;
                 }
             }
             Message::SelectCookie(selected) => {
                 if !selected {
-                    self.auth_type = AuthMethod::RpcAuth;
+                    self.config.bitcoind.auth_type = AuthMethod::RpcAuth;
                 } else {
-                    self.auth_type = AuthMethod::Cookie;
+                    self.config.bitcoind.auth_type = AuthMethod::Cookie;
                 }
             }
             Message::ToggleEveryBlock(enable) => {

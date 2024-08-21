@@ -21,4 +21,6 @@ bitcoincore-rpc = {git = "https://github.com/pythcoiner/rust-bitcoincore-rpc.git
 miniscript = {version = "12.0.0", features = ["rand"]}
 regex = "1.10.5"
 rand = "0.8.5"
+serde = { version = "1.0.208", features = ["derive"]}
+serde_yaml = "0.9.34"
 
