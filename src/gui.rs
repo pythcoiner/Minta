@@ -172,11 +172,14 @@ pub enum Message {
     GenerateToSelf,
     GenerateToRandom,
     GenerateToDescriptor,
+    GetNewAddress,
     SendToAddress,
     SendToDescriptor,
     ToggleEveryBlock(bool),
 
     KeyPressed(Key),
+
+    Nop(String),
 }
 
 #[derive(Debug)]
@@ -263,6 +266,7 @@ pub struct Gui {
     generate_address: String,
     generate_descriptor: String,
     generate_descriptor_index: String,
+    new_receive_address: Option<String>,
     send_amount: String,
     send_count: String,
     send_min: String,
@@ -769,6 +773,28 @@ impl Gui {
         Container::new(col)
     }
 
+    pub fn address_panel(&self) -> Container<Message> {
+        let col = Column::new()
+            .push(
+                Row::new()
+                    .push(Button::new("Generate new address").on_press(Message::GetNewAddress))
+                    .push(Space::with_width(Length::Fill))
+                    .align_items(iced::alignment::Alignment::Center),
+            )
+            .push_maybe(if self.new_receive_address.is_some() {
+                Some(Space::with_height(5))
+            } else {
+                None
+            })
+            .push_maybe(
+                self.new_receive_address
+                    .as_ref()
+                    .map(|addr| TextInput::new("", addr).on_input(Message::Nop)),
+            );
+
+        Container::new(col)
+    }
+
     pub fn send_panel(&self) -> Container<Message> {
         let balance = self
             .balance
@@ -984,6 +1010,7 @@ impl Application for Gui {
             send_wip: false,
             generate_target: GenerateTarget::Address,
             console: Content::new(),
+            new_receive_address: None,
         };
 
         (gui, Command::none())
@@ -1036,6 +1063,7 @@ impl Application for Gui {
                         self.generate_descriptor_index = index.to_string();
                     }
                 }
+                BitcoinMessage::NewAddress(addr) => self.new_receive_address = Some(addr),
                 _ => {}
             },
 
@@ -1109,6 +1137,10 @@ impl Application for Gui {
             }
             Message::ConsoleEdit(_) => {}
             Message::GenerateTarget(target) => self.generate_target = target,
+            Message::GetNewAddress => {
+                self.send_to_bitcoind(BitcoinMessage::GetNewAddress);
+            }
+            Message::Nop(_) => { /* its a NOP we do nothing*/ }
         }
 
         Command::none()
@@ -1125,6 +1157,10 @@ impl Application for Gui {
             .push(Rule::horizontal(4))
             .push(Space::with_height(5))
             .push(self.generate_panel())
+            .push(Space::with_height(5))
+            .push(Rule::horizontal(4))
+            .push(Space::with_height(5))
+            .push(self.address_panel())
             .push(Space::with_height(5))
             .push(Rule::horizontal(4))
             .push(Space::with_height(5))

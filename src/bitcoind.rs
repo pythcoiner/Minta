@@ -87,6 +87,8 @@ pub enum BitcoinMessage {
     GenerateToAddress(GenerateToAddress),
     /// Generate to a descriptor
     GenerateToDescriptor(GenerateToDescriptor),
+    /// Generate a new receiving address
+    GetNewAddress,
 
     /// Send bitcoins to an address
     SendToAddress(SendToAddress),
@@ -108,6 +110,7 @@ pub enum BitcoinMessage {
     SendResponse(bool),
     SendMessage(String),
     Connected(bool),
+    NewAddress(String),
     IncrementSendDescriptorIndex,
     IncrementGenerateDescriptorIndex,
 
@@ -295,6 +298,18 @@ impl BitcoinD {
         }
     }
 
+    pub fn get_new_address(&self) -> Result<String, Error> {
+        if let Some(client) = self.wallet_client.as_ref() {
+            Ok(client
+                .get_new_address(None, None)
+                .map_err(Error::Rpc)?
+                .assume_checked()
+                .to_string())
+        } else {
+            Err(Error::NotConnected)
+        }
+    }
+
     pub fn generate_to_self(&self, blocks: u32) -> Result<(), Error> {
         if let Some(client) = self.wallet_client.as_ref() {
             let address = client
@@ -446,6 +461,13 @@ impl BitcoinD {
                     self.disconnect()
                 }
             }
+            (BitcoinMessage::GetNewAddress, _) => match self.get_new_address() {
+                Ok(addr) => self.send_to_gui(BitcoinMessage::NewAddress(addr)),
+                Err(e) => self.send_to_gui(BitcoinMessage::SendMessage(format!(
+                    "Fail to get new address: {:?}",
+                    e
+                ))),
+            },
             (BitcoinMessage::Generate(blocks), false) => {
                 self.mining_busy = true;
                 if let Err(e) = self.generate(blocks) {
