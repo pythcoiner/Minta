@@ -1024,6 +1024,18 @@ impl Application for Gui {
                     }
                 }
                 BitcoinMessage::MinerStopped => self.autoblock_wip = false,
+                BitcoinMessage::IncrementSendDescriptorIndex => {
+                    if let Ok(index) = u32::from_str(&self.send_descriptor_index) {
+                        let index = index.wrapping_add(1);
+                        self.send_descriptor_index = index.to_string();
+                    }
+                }
+                BitcoinMessage::IncrementGenerateDescriptorIndex => {
+                    if let Ok(index) = u32::from_str(&self.generate_descriptor_index) {
+                        let index = index.wrapping_add(1);
+                        self.generate_descriptor_index = index.to_string();
+                    }
+                }
                 _ => {}
             },
 

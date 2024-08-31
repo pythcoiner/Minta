@@ -108,6 +108,8 @@ pub enum BitcoinMessage {
     SendResponse(bool),
     SendMessage(String),
     Connected(bool),
+    IncrementSendDescriptorIndex,
+    IncrementGenerateDescriptorIndex,
 
     // Loopback message from subthreads
     BlockMined,
@@ -313,6 +315,7 @@ impl BitcoinD {
         for index in start..end {
             let address = Self::address_from_descriptor(&self.secp, descriptor.clone(), index)?;
             self.generate_to_address(GenerateToAddress { blocks: 1, address })?;
+            self.send_to_gui(BitcoinMessage::IncrementGenerateDescriptorIndex);
         }
         Ok(())
     }
@@ -363,6 +366,7 @@ impl BitcoinD {
             let amount = Self::random_amount(params.amount_min, params.amount_max);
             let address = Self::address_from_descriptor(&self.secp, descriptor.clone(), index)?;
             self.send_to_address(SendToAddress { amount, address })?;
+            self.send_to_gui(BitcoinMessage::IncrementSendDescriptorIndex);
         }
         Ok(())
     }
