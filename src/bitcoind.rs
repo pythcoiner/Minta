@@ -89,6 +89,8 @@ pub enum BitcoinMessage {
     GenerateToDescriptor(GenerateToDescriptor),
     /// Generate a new receiving address
     GetNewAddress,
+    /// Trigger a reorg of x blocks back
+    Invalidate(u64),
 
     /// Send bitcoins to an address
     SendToAddress(SendToAddress),
@@ -278,6 +280,24 @@ impl BitcoinD {
             } else {
                 0
             }
+        }
+    }
+
+    pub fn invalidate_blocks(&self, blocks: u64) -> Result<(), Error> {
+        let actual_tip = self.get_block_height()?;
+        let target = actual_tip.saturating_sub(blocks) + 1;
+        self.invalidate_at_block_height(target)?;
+        let new_height = self.get_block_height()?;
+        self.send_to_gui(BitcoinMessage::UpdateBlockchainTip(new_height));
+        Ok(())
+    }
+
+    pub fn invalidate_at_block_height(&self, block_height: u64) -> Result<(), Error> {
+        if let Some(client) = self.client.as_ref() {
+            let block_hash = client.get_block_hash(block_height).map_err(Error::Rpc)?;
+            client.invalidate_block(&block_hash).map_err(Error::Rpc)
+        } else {
+            Err(Error::NotConnected)
         }
     }
 
@@ -562,6 +582,14 @@ impl BitcoinD {
             }
             (BitcoinMessage::StopAutoBlock, _) => {
                 self.stop_auto_block();
+            }
+            (BitcoinMessage::Invalidate(blocks), _) => {
+                if let Err(e) = self.invalidate_blocks(blocks) {
+                    self.send_to_gui(BitcoinMessage::SendMessage(format!(
+                        "Fail to reorg: {:?}",
+                        e
+                    )));
+                }
             }
 
             _ => {

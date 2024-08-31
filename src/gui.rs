@@ -159,6 +159,7 @@ pub enum Message {
     AutoblockBlocks(String),
     AutoblockTimeframe(TimeFrame),
     ConsoleEdit(Action),
+    InvalidateBlocks(String),
 
     // buttons
     SelectRpcAuth(bool),
@@ -173,6 +174,7 @@ pub enum Message {
     GenerateToRandom,
     GenerateToDescriptor,
     GetNewAddress,
+    Invalidate,
     SendToAddress,
     SendToDescriptor,
     ToggleEveryBlock(bool),
@@ -267,6 +269,7 @@ pub struct Gui {
     generate_descriptor: String,
     generate_descriptor_index: String,
     new_receive_address: Option<String>,
+    reorg_blocks: String,
     send_amount: String,
     send_count: String,
     send_min: String,
@@ -773,6 +776,32 @@ impl Gui {
         Container::new(col)
     }
 
+    pub fn invalidate_panel(&self) -> Container<Message> {
+        let blocks = u64::from_str(&self.reorg_blocks);
+        let reorg_signal =
+            if !self.autoblock_wip && !self.generate_wip && blocks.is_ok() && self.connected {
+                Some(Message::Invalidate)
+            } else {
+                None
+            };
+        let mut input = TextInput::new("", &self.reorg_blocks).width(75);
+        if (reorg_signal.is_some() || self.reorg_blocks.is_empty()) && self.connected {
+            input = input.on_input(Message::InvalidateBlocks);
+        }
+        let col = Column::new().push(
+            Row::new()
+                .push(Button::new("Invalidate").on_press_maybe(reorg_signal))
+                .push(Space::with_width(10))
+                .push(input)
+                .push(Space::with_width(10))
+                .push(Text::new(" blocks"))
+                .push(Space::with_width(Length::Fill))
+                .align_items(iced::alignment::Alignment::Center),
+        );
+
+        Container::new(col)
+    }
+
     pub fn address_panel(&self) -> Container<Message> {
         let col = Column::new()
             .push(
@@ -1011,6 +1040,7 @@ impl Application for Gui {
             generate_target: GenerateTarget::Address,
             console: Content::new(),
             new_receive_address: None,
+            reorg_blocks: String::new(),
         };
 
         (gui, Command::none())
@@ -1096,6 +1126,11 @@ impl Application for Gui {
                 Self::u32_checked(blocks, &mut self.autoblock_blocks, 1_000)
             }
             Message::AutoblockTimeframe(tf) => self.autoblocks_timeframe = tf,
+            Message::InvalidateBlocks(blocks) => {
+                if u64::from_str(&blocks).is_ok() || blocks.is_empty() {
+                    self.reorg_blocks = blocks;
+                }
+            }
 
             // Buttons
             Message::ConnectRpcAuth => self.connect_rpc_auth(),
@@ -1140,6 +1175,11 @@ impl Application for Gui {
             Message::GetNewAddress => {
                 self.send_to_bitcoind(BitcoinMessage::GetNewAddress);
             }
+            Message::Invalidate => {
+                if let Ok(blocks) = u64::from_str(&self.reorg_blocks) {
+                    self.send_to_bitcoind(BitcoinMessage::Invalidate(blocks))
+                }
+            }
             Message::Nop(_) => { /* its a NOP we do nothing*/ }
         }
 
@@ -1157,6 +1197,10 @@ impl Application for Gui {
             .push(Rule::horizontal(4))
             .push(Space::with_height(5))
             .push(self.generate_panel())
+            .push(Space::with_height(5))
+            .push(Rule::horizontal(4))
+            .push(Space::with_height(5))
+            .push(self.invalidate_panel())
             .push(Space::with_height(5))
             .push(Rule::horizontal(4))
             .push(Space::with_height(5))
