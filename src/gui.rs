@@ -803,10 +803,15 @@ impl Gui {
     }
 
     pub fn address_panel(&self) -> Container<Message> {
+        let signal = if self.connected {
+            Some(Message::GetNewAddress)
+        } else {
+            None
+        };
         let col = Column::new()
             .push(
                 Row::new()
-                    .push(Button::new("Generate new address").on_press(Message::GetNewAddress))
+                    .push(Button::new("Generate new address").on_press_maybe(signal))
                     .push(Space::with_width(Length::Fill))
                     .align_items(iced::alignment::Alignment::Center),
             )
