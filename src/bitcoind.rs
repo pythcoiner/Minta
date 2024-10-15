@@ -4,7 +4,13 @@ use std::{
     time::{self, Duration},
 };
 
-use bitcoincore_rpc::{jsonrpc::error::RpcError, Auth, Client, RpcApi};
+use bitcoincore_rpc::{
+    jsonrpc::{
+        error::RpcError,
+        serde_json::{Map, Value},
+    },
+    Auth, Client, RpcApi,
+};
 use miniscript::{
     bitcoin::{secp256k1::All, Address, Amount, Network, PrivateKey},
     Descriptor, DescriptorPublicKey,
@@ -56,6 +62,15 @@ pub struct SendToDescriptor {
 }
 
 #[derive(Debug, Clone)]
+pub struct SendMiningPayout {
+    pub count: u32,
+    pub amount: Amount,
+    pub descriptor: String,
+    pub start_index: u32,
+    pub outputs: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct SendEveryBlock {
     pub count: u32,
     pub amount_min: Amount,
@@ -96,6 +111,8 @@ pub enum BitcoinMessage {
     SendToAddress(SendToAddress),
     /// Send to bitcoin descriptor
     SendToDescriptor(SendToDescriptor),
+    /// Send many txs simulating a mining payout
+    SendMiningPayout(SendMiningPayout),
     /// Enable send every block feature
     EnableSendEveryBlock(SendEveryBlock),
     /// Disable send every block feature
@@ -131,6 +148,12 @@ pub enum Error {
     ParseDescriptor,
     DeriveDescriptor,
     Rpc(bitcoincore_rpc::Error),
+}
+
+impl From<bitcoincore_rpc::Error> for Error {
+    fn from(value: bitcoincore_rpc::Error) -> Self {
+        Error::Rpc(value)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -393,6 +416,20 @@ impl BitcoinD {
         }
     }
 
+    pub fn send_to_multi(&self, outputs: Vec<(Address, Amount)>) -> Result<(), Error> {
+        if let Some(client) = self.wallet_client.as_ref() {
+            let balance = client.get_balance(None, None);
+            let mut addresses = Map::new();
+            for (addr, amount) in outputs {
+                addresses.insert(addr.to_string(), Value::String(amount.to_btc().to_string()));
+            }
+            let args = vec![Value::String("".into()), Value::Object(addresses)];
+            Ok(client.call::<Value>("sendmany", &args).map(|_| ())?)
+        } else {
+            Err(Error::NotConnected)
+        }
+    }
+
     pub fn send_to_descriptor(&self, params: SendToDescriptor) -> Result<(), Error> {
         let (start, end) = (params.start_index, params.start_index + params.count);
         let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&params.descriptor)
@@ -402,6 +439,25 @@ impl BitcoinD {
             let address = Self::address_from_descriptor(&self.secp, descriptor.clone(), index)?;
             self.send_to_address(SendToAddress { amount, address })?;
             self.send_to_gui(BitcoinMessage::IncrementSendDescriptorIndex);
+        }
+        Ok(())
+    }
+
+    pub fn send_mining_payout(&self, params: SendMiningPayout) -> Result<(), Error> {
+        let (start, end) = (params.start_index, params.start_index + params.count);
+        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&params.descriptor)
+            .map_err(|_| Error::DeriveDescriptor)?;
+        for index in start..end {
+            let mut outputs = Vec::new();
+            let address = Self::address_from_descriptor(&self.secp, descriptor.clone(), index)?;
+            outputs.push((address, params.amount));
+            for _ in 0..params.outputs {
+                let addr = Self::get_random_address(&self.secp);
+                outputs.push((addr, params.amount));
+            }
+            self.send_to_multi(outputs)?;
+
+            // self.send_to_gui(BitcoinMessage::IncrementSendDescriptorIndex);
         }
         Ok(())
     }
@@ -542,6 +598,14 @@ impl BitcoinD {
             }
             (BitcoinMessage::SendToDescriptor(params), _) => {
                 if let Err(e) = self.send_to_descriptor(params) {
+                    self.send_to_gui(BitcoinMessage::SendMessage(format!("{:?}", e)));
+                    self.send_to_gui(BitcoinMessage::SendResponse(false));
+                } else {
+                    self.send_to_gui(BitcoinMessage::SendResponse(true));
+                }
+            }
+            (BitcoinMessage::SendMiningPayout(params), _) => {
+                if let Err(e) = self.send_mining_payout(params) {
                     self.send_to_gui(BitcoinMessage::SendMessage(format!("{:?}", e)));
                     self.send_to_gui(BitcoinMessage::SendResponse(false));
                 } else {

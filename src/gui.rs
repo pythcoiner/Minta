@@ -160,6 +160,10 @@ pub enum Message {
     AutoblockTimeframe(TimeFrame),
     ConsoleEdit(Action),
     InvalidateBlocks(String),
+    MiningPayoutTxs(String),
+    MiningPayoutOutputs(String),
+    MiningPayoutDescriptor(String),
+    MiningPayoutIndex(String),
 
     // buttons
     SelectRpcAuth(bool),
@@ -177,6 +181,7 @@ pub enum Message {
     Invalidate,
     SendToAddress,
     SendToDescriptor,
+    SendMiningPayout,
     ToggleEveryBlock(bool),
 
     KeyPressed(Key),
@@ -279,6 +284,10 @@ pub struct Gui {
     send_descriptor_index: String,
     send_every_blocks: String,
     send_every_blocks_enabled: bool,
+    mining_payout_txs: String,
+    mining_payout_outputs: String,
+    mining_payout_descriptor: String,
+    mining_payout_index: String,
     connected: bool,
     autoblock_blocks: String,
     autoblocks_timeframe: TimeFrame,
@@ -436,6 +445,26 @@ impl Gui {
             }))
         }
     }
+
+    pub fn send_mining_payout(&mut self) {
+        if let (Ok(txs), Ok(outputs), true, Ok(index)) = (
+            u32::from_str(&self.mining_payout_txs),
+            u32::from_str(&self.mining_payout_outputs),
+            !self.mining_payout_descriptor.is_empty(),
+            u32::from_str(&self.mining_payout_index),
+        ) {
+            self.send_to_bitcoind(BitcoinMessage::SendMiningPayout(
+                bitcoind::SendMiningPayout {
+                    count: txs,
+                    amount: Amount::from_btc(0.01).unwrap(),
+                    descriptor: self.mining_payout_descriptor.clone(),
+                    start_index: index,
+                    outputs,
+                },
+            ));
+        }
+    }
+
     pub fn toggle_every_blocks(&mut self, state: bool) {
         self.send_every_blocks_enabled = state;
         let count = u32::from_str(&self.send_count);
@@ -986,6 +1015,48 @@ impl Gui {
         Container::new(col)
     }
 
+    pub fn mining_payout(&self) -> Container<Message> {
+        let signal = if self.connected {
+            Some(Message::SendMiningPayout)
+        } else {
+            None
+        };
+        let enable = !self.send_wip && self.connected && !self.send_every_blocks_enabled;
+        let mut txs = TextInput::new("txs", &self.mining_payout_txs).width(60);
+        let mut outputs = TextInput::new("outputs", &self.mining_payout_outputs).width(60);
+        let mut descriptor =
+            TextInput::new("descriptor", &self.mining_payout_descriptor).width(300);
+        let mut index = TextInput::new("start index", &self.mining_payout_index).width(100);
+        if enable {
+            txs = txs.on_input(Message::MiningPayoutTxs);
+            outputs = outputs.on_input(Message::MiningPayoutOutputs);
+            descriptor = descriptor.on_input(Message::MiningPayoutDescriptor);
+            index = index.on_input(Message::MiningPayoutIndex);
+        }
+        let col = Column::new()
+            .push(
+                Row::new()
+                    .push(Button::new("Mining payout").on_press_maybe(signal))
+                    .push(Space::with_width(10))
+                    .push(txs)
+                    .push(Space::with_width(10))
+                    .push(outputs)
+                    .push(Space::with_width(Length::Fill))
+                    .align_items(iced::alignment::Alignment::Center),
+            )
+            .push(Space::with_height(5))
+            .push(
+                Row::new()
+                    .push(descriptor)
+                    .push(Space::with_width(10))
+                    .push(index)
+                    .push(Space::with_width(Length::Fill))
+                    .align_items(iced::alignment::Alignment::Center),
+            );
+
+        Container::new(col)
+    }
+
     pub fn console_panel(&self) -> Container<Message> {
         let console = TextEditor::new(&self.console).on_action(Message::ConsoleEdit);
 
@@ -1046,6 +1117,10 @@ impl Application for Gui {
             console: Content::new(),
             new_receive_address: None,
             reorg_blocks: String::new(),
+            mining_payout_txs: String::new(),
+            mining_payout_outputs: String::new(),
+            mining_payout_descriptor: String::new(),
+            mining_payout_index: String::new(),
         };
 
         (gui, Command::none())
@@ -1186,6 +1261,25 @@ impl Application for Gui {
                 }
             }
             Message::Nop(_) => { /* its a NOP we do nothing*/ }
+            Message::MiningPayoutTxs(txs) => {
+                if u32::from_str(&txs).is_ok() {
+                    self.mining_payout_txs = txs;
+                }
+            }
+            Message::MiningPayoutOutputs(outputs) => {
+                if u32::from_str(&outputs).is_ok() {
+                    self.mining_payout_outputs = outputs;
+                }
+            }
+            Message::MiningPayoutDescriptor(desc) => self.mining_payout_descriptor = desc,
+            Message::MiningPayoutIndex(index) => {
+                if u32::from_str(&index).is_ok() {
+                    self.mining_payout_index = index;
+                }
+            }
+            Message::SendMiningPayout => {
+                self.send_mining_payout();
+            }
         }
 
         Command::none()
@@ -1214,6 +1308,8 @@ impl Application for Gui {
             .push(Rule::horizontal(4))
             .push(Space::with_height(5))
             .push(self.send_panel())
+            .push(Space::with_height(5))
+            .push(self.mining_payout())
             .push(Space::with_height(5))
             .push(self.console_panel())
             .push(Space::with_height(5))

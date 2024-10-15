@@ -65,7 +65,7 @@ async fn main() {
 
     settings.window.size = Size {
         width: 500.0,
-        height: 700.0,
+        height: 800.0,
     };
     settings.window.resizable = false;
 
