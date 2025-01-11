@@ -25,7 +25,7 @@ use std::{
 
 use crate::bitcoind::{
     self, BitcoinMessage, BitcoindListener, GenerateToAddress, GenerateToDescriptor,
-    SendEveryBlock, SendToAddress, SendToDescriptor,
+    SendEveryBlock, SendToAddress, SendToDescriptor, NETWORK,
 };
 
 const MAX_DERIV: u32 = 2u32.pow(31) - 1;
@@ -385,7 +385,7 @@ impl Gui {
             u32::from_str(&self.generate_blocks),
             Address::from_str(&self.generate_address),
         ) {
-            if addr.is_valid_for_network(miniscript::bitcoin::Network::Regtest) {
+            if addr.is_valid_for_network(NETWORK) {
                 let address = addr.assume_checked();
                 self.send_to_bitcoind(BitcoinMessage::GenerateToAddress(GenerateToAddress {
                     blocks,
@@ -416,7 +416,7 @@ impl Gui {
             Amount::from_str_in(&self.send_amount, Denomination::Bitcoin),
             Address::from_str(&self.send_address),
         ) {
-            if addr.is_valid_for_network(miniscript::bitcoin::Network::Regtest) {
+            if addr.is_valid_for_network(NETWORK) {
                 let address = addr.assume_checked();
                 self.send_to_bitcoind(BitcoinMessage::SendToAddress(SendToAddress {
                     amount,

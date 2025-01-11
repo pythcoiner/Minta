@@ -24,6 +24,7 @@ use crate::{
 };
 
 const WALLET_NAME: &str = "regtest";
+pub const NETWORK: Network = Network::Regtest;
 
 listener!(BitcoindListener, BitcoinMessage, Message, Bitcoind);
 
@@ -274,9 +275,9 @@ impl BitcoinD {
     }
 
     pub fn get_random_address(secp: &miniscript::bitcoin::secp256k1::Secp256k1<All>) -> Address {
-        let prv = PrivateKey::generate(Network::Regtest);
+        let prv = PrivateKey::generate(NETWORK);
         let pb = prv.public_key(secp);
-        Address::p2pkh(pb, Network::Regtest)
+        Address::p2pkh(pb, NETWORK)
     }
 
     pub fn get_random_tx_count(send: u32, block: u32) -> u32 {
@@ -392,7 +393,7 @@ impl BitcoinD {
             .ok_or(Error::ParseDescriptor)?
             .derived_descriptor(secp, index)
             .map_err(|_| Error::DeriveDescriptor)?
-            .address(Network::Regtest)
+            .address(NETWORK)
             .map_err(|_| Error::DeriveDescriptor)
     }
 
@@ -810,7 +811,7 @@ mod tests {
             .unwrap()
             .derived_descriptor(&secp, 1)
             .unwrap()
-            .address(Network::Regtest)
+            .address(NETWORK)
             .unwrap();
     }
 }
