@@ -11,6 +11,7 @@ use bitcoincore_rpc::{
     },
     Auth, Client, RpcApi,
 };
+use log::info;
 use miniscript::{
     bitcoin::{secp256k1::All, Address, Amount, Network, PrivateKey},
     Descriptor, DescriptorPublicKey,
@@ -174,10 +175,11 @@ pub struct BitcoinD {
     mining_busy: bool,
     secp: miniscript::bitcoin::secp256k1::Secp256k1<All>,
     send_every_block: Option<SendEveryBlock>,
+    version: usize,
 }
 
 impl BitcoinD {
-    pub fn connect(&self) -> Result<(Client, Client), Error> {
+    pub fn connect(&mut self) -> Result<(Client, Client), Error> {
         if let (Some(address), Some(auth)) = (&self.address, &self.auth) {
             let client = match auth {
                 AuthMethod::Cookie { cookie_path } => {
@@ -205,38 +207,45 @@ impl BitcoinD {
             .map_err(Error::Rpc)?;
 
             match client {
-                Ok(client) => match client.load_wallet(WALLET_NAME) {
-                    Ok(_) => Ok((client, wallet_client)),
-                    Err(e) => {
-                        log::info!("Fail to load wallet...");
-                        if let bitcoincore_rpc::Error::JsonRpc(
-                            bitcoincore_rpc::jsonrpc::Error::Rpc(RpcError { code, .. }),
-                        ) = e
-                        {
-                            // -18 => wallet does not exist
-                            if code == -18 {
-                                log::info!("Wallet does not exists, creating it...");
+                Ok(client) => {
+                    self.version = client.version()? / 10000;
+                    info!("Connected to bitcoind version {}", self.version);
 
-                                client
-                                    .create_wallet(WALLET_NAME, None, None, None, None)
-                                    .map_err(Error::Rpc)?;
-                            } else if code == -35 {
-                                // -35 => wallet already loaded
-                                log::info!("Wallet already loaded!");
+                    match client.load_wallet(WALLET_NAME) {
+                        Ok(_) => Ok((client, wallet_client)),
+                        Err(e) => {
+                            log::info!("Fail to load wallet...");
+                            if let bitcoincore_rpc::Error::JsonRpc(
+                                bitcoincore_rpc::jsonrpc::Error::Rpc(RpcError { code, .. }),
+                            ) = e
+                            {
+                                // -18 => wallet does not exist
+                                if code == -18 {
+                                    log::info!("Wallet does not exists, creating it...");
+
+                                    client
+                                        .create_wallet(WALLET_NAME, None, None, None, None)
+                                        .map_err(Error::Rpc)?;
+                                } else if code == -35 {
+                                    // -35 => wallet already loaded
+                                    log::info!("Wallet already loaded!");
+                                } else {
+                                    return Err(Error::Rpc(e));
+                                }
+
+                                if self.version < 30 {
+                                    log::info!("Wallet client settxfee...");
+                                    wallet_client
+                                        .call::<bool>("settxfee", &[0.0001.into()])
+                                        .map_err(Error::Rpc)?;
+                                }
+                                Ok((client, wallet_client))
                             } else {
-                                return Err(Error::Rpc(e));
+                                Err(Error::Rpc(e))
                             }
-
-                            log::info!("Wallet client settxfee...");
-                            wallet_client
-                                .call::<bool>("settxfee", &[0.0001.into()])
-                                .map_err(Error::Rpc)?;
-                            Ok((client, wallet_client))
-                        } else {
-                            Err(Error::Rpc(e))
                         }
                     }
-                },
+                }
                 Err(e) => Err(Error::Rpc(e)),
             }
         } else {
@@ -776,6 +785,7 @@ impl ServiceFn<BitcoinMessage> for BitcoinD {
             secp: miniscript::bitcoin::secp256k1::Secp256k1::new(),
             send_every_block: None,
             auto_block_sender: None,
+            version: 0,
         }
     }
 
