@@ -1113,7 +1113,7 @@ impl Application for Gui {
             autoblocks_timeframe: TimeFrame::Second,
             generate_wip: false,
             send_wip: false,
-            generate_target: GenerateTarget::Address,
+            generate_target: GenerateTarget::ToSelf,
             console: Content::new(),
             new_receive_address: None,
             reorg_blocks: String::new(),
